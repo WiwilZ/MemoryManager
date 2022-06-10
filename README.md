@@ -1,6 +1,6 @@
 # MemoryManager
 - Allocator（内存分配器）：固定分区（类型）分配
-  - 每个`block`中有一块大小为类型`T`字节数的`buffer`，还有一个`next`指针指向下一个`block`。
+  - 每个`block`中有一块大小为模板类型参数`T`字节数的`buffer`，还有一个`next`指针指向下一个`block`。
   - 每个`chunk`中有`blocks_per_chunk`个`block`，还有一个`next`指针指向下一个`chunk`。每创建一个`chunk`，其中前`blocks_per_chunk-1`个`block`的`next`指针都指向下一个`block`。
   - 维护一个`chunk`单向链表头结点和空闲`block`单向链表头结点。
   - 分配内存时，若空闲`block`头结点不为空，则将其分配，空闲`block`头结点指向其下一个`block`，否则创建一个新的`chunk`，采用头插法插入当前`chunk`头结点之前，将其中的第一个`block`分配，第二个`block`作为空闲`block`头结点。
