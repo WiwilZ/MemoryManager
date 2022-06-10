@@ -7,6 +7,7 @@
 #include <utility>
 #include <cstddef>
 
+
 template <typename T>
 class Allocator {
     static constexpr size_t block_size = sizeof(T);
