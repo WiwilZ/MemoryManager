@@ -4,11 +4,12 @@
   - 每个`chunk`中有`blocks_per_chunk`个`block`，还有一个`next`指针指向下一个`chunk`。每创建一个`chunk`，其中前`blocks_per_chunk-1`个`block`的`next`指针都指向下一个`block`。
   - 维护一个`chunk`单向链表头结点和空闲`block`单向链表头结点。
   - 分配内存时，若空闲`block`头结点不为空，则将其分配，空闲`block`头结点指向其下一个`block`，否则创建一个新的`chunk`，采用头插法插入当前`chunk`头结点之前，将其中的第一个`block`分配，第二个`block`作为空闲`block`头结点。
-  - 归还内存时，采用头插法插入当前空闲`block`头结点之前。
+  - 回收内存时，采用头插法插入当前空闲`block`头结点之前。
 - MemoryPool（内存池）：动态分区分配
-  - 使用`tag`记录每块`buffer`的信息，`tag`大小为`sizeof(size_t)`个字节，格式为: size prev_free(1b) free(1b)，最低位表示当前`block`是否空闲，次低位表示前一个`block`是否空闲，其余表示当前`block`的字节数，包括`tag`和`buffer`。将当前`block`头部的`tag`指针加上`tag`中记录的`size`个字节即可访问下一个`block`头部的`tag`
-  - 每个`block`头部应有一个`tag`，回收内存时将指针回退`tag`所占字节数个字节即可访问到它。
-  - 空闲`block`通过查看`prev_free`判断前一个`block`是否空闲，若空闲则需要与其合并。为了能访问到前一个空闲`block`，需要给空闲`block`的尾部也加上`tag`，它的内容与头部的`tag`相同。这样将当前`block`头部的`tag`指针回退`tag`所占字节数个字节即可访问前一个空闲`block`尾部的`tag`。因此对于空闲`block`，它的`tag`中记录的`size`为两倍`tag`所占字节数加上一个`buffer`的大小。 非空闲`block`的尾部无需加`tag`，因为若`prev_free`不为`true`时无需访问前一个非空闲的`block`。
+  - 每个`block`头部有一个`tag`记录每块`buffer`的信息，`tag`大小为`sizeof(size_t)`个字节，格式为: size prev_free(1b) free(1b)，最低位表示当前`block`是否空闲，次低位表示前一个`block`是否空闲，其余表示当前`block`（包括`tag`和`buffer`）的字节数。
+  - 每个`chunk`中的`block`组成单链表，将当前`block`头部的`tag`指针加上`tag`中记录的`size`个字节即可访问下一个`block`头部的`tag`。
+  - 空闲`block`通过`prev_free`标志判断前一个`block`是否空闲，若空闲则需要与其合并。为了能访问到前一个空闲`block`，需要给空闲`block`的尾部也加上`tag`，它的内容与头部的`tag`相同。这样将当前`block`头部的`tag`指针回退`tag`所占字节数个字节即可访问前一个空闲`block`尾部的`tag`。因此对于空闲`block`，它的`tag`中记录的`size`为两倍`tag`所占字节数加上一个`buffer`的大小。 非空闲`block`的尾部无需加`tag`，因为若`prev_free`不为`true`时无需访问前一个非空闲的`block`。
   - 每个`chunk`的开头需要储存下个`chunk`的地址，供释放内存时用；结尾也需要储存下个`chunk`的地址，供最后一个`block`跳转下个`chunk`的第一个`block`时用。为了让`block`能够识别出到达了`chunk`的尾部，需要在最后一个`block`之后留出一个`tag`的空间，置为0，当访问到此全0`tag`就知道到达了`chunk`的尾部。第一个`block`之前无需特殊标记，因为它的`prev_free`在新`chunk`创建时就已经设置为`false`，并且由于它前面没有`block`了，它的`prev_free`肯定不会改为`true`，也就不会访问到前面的内存。
   - 无论`block`是否空闲，它的`buffer`的大小都为`tag`中记录的`size`减去一个`tag`所占字节数。对于空闲`block`，当其被分配时，即转为非空闲`block`时，其尾部的`tag`的空间也作为`buffer`。
-  - 分配内存采用循环首次适应算法。使用一个变量`curr_block_`记录当前`block`的地址，下次继续请求分配内存时从`curr_block_`开始遍历。当遍历到最后一个`block`时，若下个`chunk`的地址不为空，则移动`curr_block_`至下个`chunk`的第一个`block`，否则移动`curr_block_`至第一个`chunk`的第一个`block`。当`curr_block_`回到初始位置时，说明没找到符合条件的`block`，需要创建新的`chunk`。
+  - 内存分配采用循环首次适应（Next Fit）算法。使用一个变量`curr_block_`记录当前`block`的地址，下次继续请求分配内存时从`curr_block_`开始遍历。当遍历到最后一个`block`时，若下个`chunk`的地址不为空，则移动`curr_block_`至下个`chunk`的第一个`block`，否则移动`curr_block_`至第一个`chunk`的第一个`block`。当`curr_block_`回到初始位置时，说明没找到符合条件的`block`，需要创建新的`chunk`，采用头插法，将`curr_block_`指向其第一个`block`。之后判断分配完所需空间剩余`buffer`的大小，若小于两倍`tag`所占空间则不分裂，将`curr_block_`指向下一个`block`，否则分裂当前`block`，将`curr_block_`指向分裂后的那个`block`。
+  - 回收内存时，将指针回退`tag`所占字节数个字节可访问到当前`block`头部的`tag`，此时需要判断前后`block`是否空闲。对于下一个`block`：加上`tag`中记录的`size`个字节即可访问下一个`block`头部的`tag`，通过它的`free`标志判断其是否空闲进而判断是否要与其合并。对于前一个`block`：通过`prev_free`标志判断前一个`block`是否空闲，若空闲则回退`tag`所占字节数个字节即可访问前一个`block`尾部的`tag`。
