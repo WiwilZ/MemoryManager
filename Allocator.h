@@ -14,7 +14,8 @@ class Allocator {
     static constexpr size_t blocks_per_chunk = 128;
 
     struct FreeBlock {
-        std::byte buffer[block_size];
+        std::byte payload[block_size];
+        void* const mask{ payload };
         FreeBlock* next{};
     };
 
@@ -28,6 +29,9 @@ class Allocator {
             }
         }
     };
+
+    Chunk* chunk_head_{};
+    FreeBlock* free_block_head_{};
 
 public:
     constexpr Allocator() noexcept = default;
@@ -50,7 +54,7 @@ public:
         return *this;
     }
 
-    ~Allocator() {
+    constexpr ~Allocator() noexcept {
         while (chunk_head_) {
             delete std::exchange(chunk_head_, chunk_head_->next);
         }
@@ -71,13 +75,13 @@ public:
 
     void deallocate(T* p) noexcept {
         auto block = reinterpret_cast<FreeBlock*>(p);
+        if (block->mask != p) {
+            return;
+        }
+
         block->next = free_block_head_;
         free_block_head_ = block;
     }
-
-private:
-    Chunk* chunk_head_{};
-    FreeBlock* free_block_head_{};
 };
 
 
