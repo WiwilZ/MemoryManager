@@ -8,267 +8,244 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <limits>
+#include <cassert>
 
 
-/*
- * chunk: |next chunk ptr|block|...|block|
- * block meta: size is_last(1b) is_prev_free(1b) free(1b)
- * free block: |header(meta|mask)|payload|footer(header ptr)|
- * unfree block: |header(meta|mask)|payload|
- */
 class MemoryPool {
-    static constexpr size_t default_size = size_t{ 1 } << 12;
+	static constexpr size_t default_size = size_t{ 1 } << 12;
 
-    struct BlockHeader;
+	struct UnfreeBlock {
+		size_t is_last: 1;
+		size_t is_free: 1;
+		size_t is_prev_free: 1;
+		size_t size: std::numeric_limits<size_t>::digits - 3;
 
-    struct BlockFooter {
-        BlockHeader* header;
-    };
+		inline constexpr void set(bool _is_last, bool _is_free, bool _is_prev_free, size_t _size) noexcept {
+			is_last = _is_last;
+			is_free = _is_free;
+			is_prev_free = _is_prev_free;
+			size = _size;
+		}
+	};
 
-    struct BlockHeader {
-        size_t meta;
-        void* const mask{ payload };
-        std::byte payload[0];
+	struct FreeBlock : UnfreeBlock {
+		FreeBlock* prev;
+		FreeBlock* next;
+	};
 
-        [[nodiscard]] constexpr size_t block_size() const noexcept {
-            return meta >> 3;
-        }
 
-        [[nodiscard]] constexpr size_t payload_size() const noexcept {
-            return block_size() - block_footer_size;
-        }
+	static inline FreeBlock* Next_neighbor(UnfreeBlock* block) noexcept {
+		assert(!block->is_last);
+		return reinterpret_cast<FreeBlock*>(reinterpret_cast<std::byte*>(block) + block->size);
+	}
 
-        [[nodiscard]] constexpr bool is_last() const noexcept {
-            return (meta >> 2) & 1;
-        }
+	static inline FreeBlock* Prev_neighbor(UnfreeBlock* block) noexcept {
+		assert(block->is_prev_free);
+		return *reinterpret_cast<FreeBlock**>(reinterpret_cast<std::byte*>(block) - free_block_footer_size);
+	}
 
-        [[nodiscard]] constexpr bool is_prev_free() const noexcept {
-            return (meta >> 1) & 1;
-        }
+	static inline FreeBlock** Footer(FreeBlock* block) noexcept {
+		return reinterpret_cast<FreeBlock**>(reinterpret_cast<std::byte*>(block) + block->size - free_block_footer_size);
+	}
 
-        [[nodiscard]] constexpr bool is_free() const noexcept {
-            return meta & 1;
-        }
+	static inline FreeBlock* Split_block(UnfreeBlock* block, size_t first_size) noexcept {
+		return reinterpret_cast<FreeBlock*>(reinterpret_cast<std::byte*>(block) + first_size);
+	}
 
-        constexpr void set_last() noexcept {
-            meta |= 0b100;
-        }
+	static inline void* Buffer(UnfreeBlock* block) noexcept {
+		return reinterpret_cast<std::byte*>(block) + unfree_block_header_size;
+	}
 
-        constexpr void set_prev_free() noexcept {
-            meta |= 0b10;
-        }
 
-        constexpr void set_free() noexcept {
-            meta |= 1;
-        }
+	static constexpr size_t unfree_block_header_size = sizeof(UnfreeBlock);
+	static constexpr size_t free_block_header_size = sizeof(FreeBlock);
+	static constexpr size_t free_block_footer_size = sizeof(FreeBlock*);
+	static constexpr size_t free_block_tag_size = free_block_header_size + free_block_footer_size;
+	static constexpr size_t chunk_header_size = sizeof(void*);
 
-        constexpr void set_not_last() noexcept {
-            meta &= ~size_t{ 0b100 };
-        }
+	void* chunk_head_{};
+	FreeBlock* free_block_head_{};
 
-        constexpr void set_prev_unfree() noexcept {
-            meta &= ~size_t{ 0b10 };
-        }
-
-        constexpr void set_unfree() noexcept {
-            meta &= ~size_t{ 1 };
-        }
-
-        [[nodiscard]] BlockFooter* footer() const noexcept {
-            return (BlockFooter*) ((std::byte*) next_block() - block_footer_size);
-        }
-
-        [[nodiscard]] BlockHeader* next_block() const noexcept {
-            return (BlockHeader*) ((std::byte*) this + block_size());
-        }
-
-        [[nodiscard]] BlockHeader* prev_block() const noexcept {
-            return ((BlockFooter*) ((std::byte*) this - block_footer_size))->header;
-        }
-
-        constexpr void merge_next_block() noexcept {
-            size_t blockSize = block_size();
-            size_t isLast = meta & 0b100;
-            if (!isLast && next_block()->is_free()) {
-                blockSize += next_block()->block_size();
-                isLast = next_block()->meta & 0b100;
-            }
-            meta = (blockSize << 3) | isLast | (meta & 0b10);
-        }
-
-        constexpr BlockHeader* merge_prev_block() noexcept {
-            if (!is_prev_free()) {
-                return this;
-            }
-            const auto block = prev_block();
-            const size_t blockSize = block_size() + block->block_size();
-            return new(block) BlockHeader{ (blockSize << 3) | (meta & 0b100) };
-        }
-    };
-
-    struct ChunkHeader {
-        ChunkHeader* next;
-        std::byte payload[0];
-
-        [[nodiscard]] BlockHeader* first_block() const noexcept {
-            return (BlockHeader*) payload;
-        }
-    };
-
-    struct ChunkFooter {
-        ChunkHeader* next;
-    };
-
-    static constexpr size_t chunk_header_size = sizeof(ChunkHeader);
-    static constexpr size_t chunk_footer_size = sizeof(ChunkFooter);
-    static constexpr size_t chunk_tag_size = chunk_header_size + chunk_footer_size;
-
-    static constexpr size_t block_header_size = sizeof(BlockHeader);
-    static constexpr size_t block_footer_size = sizeof(BlockFooter);
-    static constexpr size_t block_tag_size = block_header_size + block_footer_size;
-
-    ChunkHeader* chunk_head_{};
-    BlockHeader* curr_block_{};
+	constexpr MemoryPool() noexcept = default;
 
 public:
-    MemoryPool(const MemoryPool&) = delete;
+	MemoryPool(const MemoryPool&) = delete;
+	constexpr MemoryPool& operator=(const MemoryPool&) = delete;
 
-    constexpr ~MemoryPool() noexcept {
-        while (chunk_head_) {
-            delete std::exchange(chunk_head_, chunk_head_->next);
-        }
-    }
 
-    static MemoryPool& instance() noexcept {
-        static MemoryPool inst;
-        return inst;
-    }
+	constexpr ~MemoryPool() noexcept {
+		for (auto p = chunk_head_; p; p = *reinterpret_cast<void**>(chunk_head_)) {
+			operator delete[](p);
+		}
+	}
 
-    [[nodiscard]] void* allocate(size_t size) {
-        if (size == 0) {
-            return nullptr;
-        }
+	static MemoryPool& instance() noexcept {
+		static MemoryPool inst;
+		return inst;
+	}
 
-        if (chunk_head_) {
-            const auto start = curr_block_;
-            const size_t allocSize = block_header_size + size;
-            do {
-                if (curr_block_->is_free()) {
-                    if (auto res = Alloc_from_curr_block(allocSize); res != nullptr) {
-                        return res;
-                    }
-                }
+public:
+	[[nodiscard, gnu::alloc_size(2)]] constexpr void* allocate(size_t size) {
+		if (size == 0) {
+			return nullptr;
+		}
 
-                if (curr_block_->is_last()) {
-                    auto next_chunk = reinterpret_cast<ChunkFooter*>(curr_block_->next_block())->next;
-                    if (!next_chunk) {
-                        next_chunk = chunk_head_;
-                    }
-                    curr_block_ = next_chunk->first_block();
-                } else {
-                    curr_block_ = curr_block_->next_block();
-                }
-            } while (curr_block_ != start);
-        }
+		const auto alloc_size = std::max(unfree_block_header_size + size, free_block_tag_size);
+		const auto alloc_size_last = std::max(unfree_block_header_size + size, free_block_header_size);
 
-        return Alloc_from_new_chunk(size);
-    }
+		for (auto curr = free_block_head_; curr; curr = curr->next) {
+			if (const auto res = Alloc(curr, alloc_size, alloc_size_last); res != nullptr) {
+				return res;
+			}
+		}
 
-    [[nodiscard]] void* reallocate(void* p, size_t size) {
-        if (p == nullptr) {
-            return allocate(size);
-        }
+		const auto extend_size = chunk_header_size + alloc_size + free_block_header_size;
+		const auto chunk_size = std::max(default_size, std::bit_ceil(extend_size));
+		const auto p = new(std::align_val_t{ alignof(max_align_t) }) std::byte[chunk_size];
 
-        const auto block = static_cast<BlockHeader*>(p) - 1;
-        if (block->mask != p) {
-            return nullptr;
-        }
+		*reinterpret_cast<void**>(p) = chunk_head_;
+		chunk_head_ = p;
 
-        const size_t payloadSize = block->block_size() - block_header_size;
-        const size_t allocSize = block_header_size + size;
+		const auto res = reinterpret_cast<UnfreeBlock*>(p + chunk_header_size);
+		res->set(false, false, false, alloc_size);
 
-        curr_block_ = block;
+		auto next_neighbor = Split_block(res, alloc_size);
+		next_neighbor->set(true, true, false, chunk_size - chunk_header_size - alloc_size);
+		Insert_block(next_neighbor);
+		return Buffer(res);
+	}
 
-        curr_block_->merge_next_block();
-        if (auto res = Alloc_from_curr_block(allocSize); res != nullptr) {
-            return res;
-        }
+	[[nodiscard]] constexpr void* reallocate(void* p, size_t size) {
+		if (p == nullptr) {
+			return allocate(size);
+		}
 
-        curr_block_ = curr_block_->merge_prev_block();
-        if (curr_block_ != block) {
-            if (auto res = Alloc_from_curr_block(allocSize); res != nullptr) {
-                return memcpy(res, p, payloadSize);
-            }
-        }
+		auto block = reinterpret_cast<FreeBlock*>(static_cast<UnfreeBlock*>(p) - unfree_block_header_size);
 
-        Free_curr_block();
-        return memcpy(allocate(size), p, payloadSize);
-    }
+		const auto payload_size = block->size - unfree_block_header_size;
+		const auto alloc_size = std::max(unfree_block_header_size + size, free_block_tag_size);
+		const auto alloc_size_last = std::max(unfree_block_header_size + size, free_block_header_size);
 
-    void deallocate(void* p) noexcept {
-        if (p == nullptr) {
-            return;
-        }
+		block = Merge_next(block);
+		if (const auto res = Alloc(block, alloc_size, alloc_size_last); res != nullptr) {
+			return res;
+		}
 
-        const auto block = static_cast<BlockHeader*>(p) - 1;
-        if (block->mask != p) {
-            return;
-        }
+		if (const auto t = Merge_prev(block); block != t) {
+			block = t;
+			if (const auto res = Alloc(block, alloc_size, alloc_size_last); res != nullptr) {
+				return memcpy(res, p, payload_size);
+			}
+		}
 
-        block->merge_next_block();
-        curr_block_ = block->merge_prev_block();
-        Free_curr_block();
-    }
+		Free(block);
+		return memcpy(allocate(size), p, payload_size);
+	}
+
+	void deallocate(void* p) noexcept {
+		if (p == nullptr) {
+			return;
+		}
+
+		auto block = reinterpret_cast<FreeBlock*>(static_cast<UnfreeBlock*>(p) - unfree_block_header_size);
+		block = Merge_next(block);
+		block = Merge_prev(block);
+		Free(block);
+	}
 
 private:
-    constexpr MemoryPool() noexcept = default;
+	constexpr void* Alloc(FreeBlock*& block, size_t alloc_size, size_t alloc_size_last) noexcept {
+		if (!block->is_last) {
+			const auto remain_size = static_cast<ssize_t>(block->size - alloc_size);
+			if (block->size >= free_block_tag_size) {
+				auto next_neighbor = Split_block(block, alloc_size);
+				next_neighbor->set(false, true, false, remain_size);
+				*Footer(next_neighbor) = next_neighbor;
+				Insert_block(next_neighbor);
 
-    void* Alloc_from_new_chunk(size_t size) {
-        const size_t extend_size = chunk_tag_size + block_header_size + size + block_tag_size;
-        const size_t chunk_size = std::max(default_size, size_t{ 1 } << std::bit_width(extend_size));
+				Extract_block(block);
+				block->is_free = false;
+				block->size = alloc_size;
+				return Buffer(block);
+			}
+			if (block->size >= 0) {
+				Extract_block(block);
+				block->is_free = false;
+				Next_neighbor(block)->is_prev_free = false;
+				return Buffer(block);
+			}
+		} else {
+			const auto remain_size = static_cast<ssize_t>(block->size - alloc_size_last);
+			if (block->size >= free_block_header_size) {
+				auto next_neighbor = Split_block(block, alloc_size);
+				next_neighbor->set(true, true, false, remain_size);
+				Insert_block(next_neighbor);
 
-        auto p = new std::byte[chunk_size];
-        chunk_head_ = new(p) ChunkHeader{ chunk_head_ };
+				Extract_block(block);
+				block->is_free = false;
+				block->is_last = false;
+				block->size = alloc_size;
+				return Buffer(block);
+			}
+			if (block->size >= 0) {
+				Extract_block(block);
+				block->is_free = false;
+				return Buffer(block);
+			}
+		}
+		return nullptr;
+	}
 
-        auto q = p + chunk_size - chunk_footer_size;
-        new(q) ChunkFooter{ chunk_head_->next };
+	constexpr void Free(FreeBlock*& block) noexcept {
+		block->is_free = true;
+		if (!block->is_last) {
+			*Footer(block) = block;
+			Next_neighbor(block)->is_prev_free = true;
+		}
+		Insert_block(block);
+	}
 
-        const size_t alloc_size = block_header_size + size;
-        auto target_block = new(chunk_head_->payload) BlockHeader{ alloc_size << 3 };
+	constexpr void Extract_block(FreeBlock*& block) noexcept {
+		if (block->prev) {
+			block->prev->next = block->next;
+		} else {
+			free_block_head_ = block->next;
+		}
+		if (block->next) {
+			block->next->prev = block->prev;
+		}
+	}
 
-        p = reinterpret_cast<std::byte*>(target_block) + alloc_size;
-        curr_block_ = new(p) BlockHeader{ (static_cast<size_t>(q - p) << 3) | 0b101 };
-        curr_block_->footer()->header = curr_block_;
+	constexpr void Insert_block(FreeBlock*& block) noexcept {
+		block->prev = nullptr;
+		block->next = free_block_head_;
+		if (free_block_head_) {
+			free_block_head_->prev = block;
+		}
+		free_block_head_ = block;
+	}
 
-        return target_block->payload;
-    }
+	constexpr FreeBlock* Merge_next(FreeBlock* block) noexcept {
+		if (!block->is_last) {
+			auto next_neighbor = Next_neighbor(block);
+			if (next_neighbor->is_free) {
+				Extract_block(next_neighbor);
+				block->size += next_neighbor->size;
+				block->is_last = next_neighbor->is_last;
+			}
+		}
+		return block;
+	}
 
-    void* Alloc_from_curr_block(size_t allocSize) noexcept {
-        const ssize_t freeSize = curr_block_->block_size() - allocSize;
-        if (freeSize < 0) {
-            return nullptr;
-        }
-        if (freeSize < block_tag_size) {
-            curr_block_->set_unfree();
-            return curr_block_->payload;
-        }
-        const size_t isLast = curr_block_->meta & 0b100;
-        const size_t prevFree = curr_block_->meta & 0b10;
-        auto targetBlock = new(curr_block_) BlockHeader{ (allocSize << 3) | prevFree };
-        curr_block_ = new(targetBlock->next_block()) BlockHeader{ (freeSize << 3) | isLast | 1 };
-        curr_block_->footer()->header = curr_block_;
-        if (!isLast) {
-            curr_block_->next_block()->set_prev_free();
-        }
-        return targetBlock->payload;
-    }
-
-    void Free_curr_block() noexcept {
-        curr_block_->set_free();
-        curr_block_->footer()->header = curr_block_;
-        if (!curr_block_->is_last()) {
-            curr_block_->next_block()->set_prev_free();
-        }
-    }
+	constexpr FreeBlock* Merge_prev(FreeBlock* block) noexcept {
+		if (block->is_prev_free) {
+			auto prev_neighbor = Prev_neighbor(block);
+			Extract_block(prev_neighbor);
+			block->size += prev_neighbor->size;
+			block->is_prev_free = prev_neighbor->is_prev_free;
+		}
+		return block;
+	}
 };
 

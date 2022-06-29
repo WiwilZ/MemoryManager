@@ -6,84 +6,80 @@
 
 #include <utility>
 #include <cstddef>
+#include <memory>
 
 
 template <typename T>
 class Allocator {
-    static constexpr size_t block_size = sizeof(T);
-    static constexpr size_t blocks_per_chunk = 128;
+	static constexpr size_t blocks_per_chunk = size_t{ 1 } << 8;
 
-    struct FreeBlock {
-        std::byte payload[block_size];
-        void* const mask{ payload };
-        FreeBlock* next{};
-    };
+	struct FreeBlock {
+		std::byte payload[sizeof(T)];
+		union {
+			void* flag; //for allocated
+			FreeBlock* next; //for free
+		};
+	};
 
-    struct Chunk {
-        FreeBlock blocks[blocks_per_chunk];
-        Chunk* next{};
+	struct Chunk {
+		FreeBlock blocks[blocks_per_chunk];
+		Chunk* next;
 
-        constexpr Chunk() noexcept {
-            for (auto it = std::begin(blocks); it != std::end(blocks) - 1; ++it) {
-                it->next = it + 1;
-            }
-        }
-    };
+		constexpr Chunk() noexcept {
+			auto it = blocks;
+			for (; it != blocks + blocks_per_chunk - 1; ++it) {
+				it->next = it + 1;
+			}
+			it->next = nullptr;
+		}
+	};
 
-    Chunk* chunk_head_{};
-    FreeBlock* free_block_head_{};
+	Chunk* chunk_head_{};
+	FreeBlock* free_block_head_{};
 
 public:
-    constexpr Allocator() noexcept = default;
-    constexpr Allocator(const Allocator&) noexcept = default;
+	constexpr Allocator() noexcept = default;
+	constexpr Allocator(const Allocator&) = delete;
+	constexpr Allocator& operator=(const Allocator&) = delete;
 
-    template <typename U>
-    constexpr explicit Allocator(const Allocator<U>&) noexcept {}
+	constexpr ~Allocator() noexcept {
+		while (chunk_head_) {
+			delete std::exchange(chunk_head_, chunk_head_->next);
+		}
+	}
 
-    constexpr Allocator(Allocator&& al) noexcept
-            : chunk_head_(std::exchange(al.chunk_head_, nullptr)),
-              free_block_head_(std::exchange(al.free_block_head_, nullptr)) {}
+	[[nodiscard]] constexpr T* allocate() {
+		if (free_block_head_) {
+			auto tmp = free_block_head_->next;
+			free_block_head_->flag = free_block_head_->payload;
+			return reinterpret_cast<T*>(std::exchange(free_block_head_, tmp));
+		}
 
-    constexpr Allocator& operator=(const Allocator&) noexcept = delete;
+		auto chunk = new Chunk;
+		chunk->next = chunk_head_;
+		chunk_head_ = chunk;
 
-    constexpr Allocator& operator=(Allocator&& al) noexcept {
-        if (this != std::addressof(al)) {
-            chunk_head_ = std::exchange(al.chunk_head_, nullptr);
-            free_block_head_ = std::exchange(al.free_block_head_, nullptr);
-        }
-        return *this;
-    }
+		free_block_head_ = chunk->blocks + 1;
+		return reinterpret_cast<T*>(chunk->blocks);
+	}
 
-    constexpr ~Allocator() noexcept {
-        while (chunk_head_) {
-            delete std::exchange(chunk_head_, chunk_head_->next);
-        }
-    }
+	constexpr void deallocate(T* p) noexcept {
+		auto block = reinterpret_cast<FreeBlock*>(p);
+		if (block->flag != p) {
+			return;
+		}
 
-    [[nodiscard]] T* allocate() {
-        if (free_block_head_) {
-            return reinterpret_cast<T*>(std::exchange(free_block_head_, free_block_head_->next));
-        }
+		block->next = free_block_head_;
+		free_block_head_ = block;
+	}
 
-        auto chunk = new Chunk;
-        chunk->next = chunk_head_;
-        chunk_head_ = chunk;
+	template <typename U, typename... Args>
+	constexpr void construct(U* p, Args&& ... args) {
+		std::uninitialized_construct_using_allocator(p, *this, std::forward<Args>(args)...);
+	}
 
-        free_block_head_ = std::begin(chunk->blocks) + 1;
-        return reinterpret_cast<T*>(std::begin(chunk->blocks));
-    }
-
-    void deallocate(T* p) noexcept {
-        auto block = reinterpret_cast<FreeBlock*>(p);
-        if (block->mask != p) {
-            return;
-        }
-
-        block->next = free_block_head_;
-        free_block_head_ = block;
-    }
+	template <typename U>
+	constexpr void destroy(U* p) {
+		p->~U();
+	}
 };
-
-
-
-
