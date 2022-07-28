@@ -24,7 +24,7 @@ class Allocator {
 		FreeBlock blocks[blocks_per_chunk];
 		Chunk* next;
 
-		constexpr Chunk() noexcept {
+		constexpr Chunk(Chunk* next = nullptr) noexcept: next(next) {
 			auto it = blocks;
 			for (; it != blocks + blocks_per_chunk - 1; ++it) {
 				it->next = it + 1;
@@ -33,8 +33,8 @@ class Allocator {
 		}
 	};
 
-	Chunk* chunk_head_{};
-	FreeBlock* free_block_head_{};
+	Chunk* chunk_head{};
+	FreeBlock* free_block_head{};
 
 public:
 	constexpr Allocator() noexcept = default;
@@ -42,24 +42,21 @@ public:
 	Allocator& operator=(const Allocator&) = delete;
 
 	constexpr ~Allocator() noexcept {
-		while (chunk_head_) {
-			delete[] std::exchange(chunk_head_, chunk_head_->next);
+		while (chunk_head) {
+			delete[] std::exchange(chunk_head, chunk_head->next);
 		}
 	}
 
 	[[nodiscard]] constexpr T* allocate() {
-		if (free_block_head_) {
-			const auto tmp = free_block_head_->next;
-			free_block_head_->flag = free_block_head_->payload;
-			return reinterpret_cast<T*>(std::exchange(free_block_head_, tmp));
+		if (free_block_head) {
+			const auto tmp = free_block_head->next;
+			free_block_head->flag = free_block_head->payload;
+			return reinterpret_cast<T*>(std::exchange(free_block_head, tmp));
 		}
 
-		const auto chunk = new Chunk;
-		chunk->next = chunk_head_;
-		chunk_head_ = chunk;
-
-		free_block_head_ = chunk->blocks + 1;
-		return reinterpret_cast<T*>(chunk->blocks);
+		chunk_head = new Chunk(chunk_head);
+		free_block_head = chunk_head->blocks + 1;
+		return reinterpret_cast<T*>(chunk_head->blocks);
 	}
 
 	constexpr void deallocate(T* p) noexcept {
@@ -68,8 +65,8 @@ public:
 			return;
 		}
 
-		block->next = free_block_head_;
-		free_block_head_ = block;
+		block->next = free_block_head;
+		free_block_head = block;
 	}
 
 	template <typename U, typename... Args>
