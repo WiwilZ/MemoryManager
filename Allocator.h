@@ -13,10 +13,10 @@ class Allocator {
 	static constexpr size_t blocks_per_chunk = size_t{ 1 } << 10;
 
 	struct FreeBlock {
-		std::byte payload[sizeof(T)];
+		std::byte buffer[sizeof(T)];
 		union {
-			void* flag; //for allocated
-			FreeBlock* next; //for free
+			void* mask; //用于已分配的内存块
+			FreeBlock* next; //用于未分配的内存块
 		};
 	};
 
@@ -24,9 +24,10 @@ class Allocator {
 		FreeBlock blocks[blocks_per_chunk];
 		Chunk* next;
 
-		constexpr Chunk(Chunk* next = nullptr) noexcept: next(next) {
+		constexpr explicit Chunk(Chunk* next = nullptr) noexcept: next(next) {
 			auto it = blocks;
-			for (; it != blocks + blocks_per_chunk - 1; ++it) {
+			it->mask = it->buffer; //第一个 block 用于分配
+			for (++it; it != blocks + blocks_per_chunk - 1; ++it) {
 				it->next = it + 1;
 			}
 			it->next = nullptr;
@@ -49,20 +50,20 @@ public:
 
 	[[nodiscard]] constexpr T* allocate() {
 		if (free_block_head) {
-			const auto tmp = free_block_head->next;
-			free_block_head->flag = free_block_head->payload;
-			return reinterpret_cast<T*>(std::exchange(free_block_head, tmp));
+			const auto next_block = free_block_head->next;
+			free_block_head->mask = free_block_head->buffer;
+			return reinterpret_cast<T*>(std::exchange(free_block_head, next_block));
 		}
 
-		chunk_head = new Chunk(chunk_head);
+		chunk_head = new Chunk{ chunk_head };
 		free_block_head = chunk_head->blocks + 1;
 		return reinterpret_cast<T*>(chunk_head->blocks);
 	}
 
-	constexpr void deallocate(T* p) noexcept {
+	constexpr void deallocate(T* p) {
 		const auto block = reinterpret_cast<FreeBlock*>(p);
-		if (block->flag != p) {
-			return;
+		if (block->mask != p) {
+			throw std::runtime_error("The pointer is not allocated from here.");
 		}
 
 		block->next = free_block_head;
