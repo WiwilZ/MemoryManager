@@ -5,7 +5,7 @@
 #pragma once
 
 #include <utility>
-#include <cstring>
+#include <memory>
 
 
 class MemoryPool {
